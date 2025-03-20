@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 
-username = "username" 
+username = "gutomp4" 
 base_url = f"https://letterboxd.com/{username}/films/by/date/page/"
 
 headers = {
