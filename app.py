@@ -1,14 +1,17 @@
+import pandas as pd
+import numpy as np
 from flask import Flask, jsonify
 from flask_cors import CORS
 import psycopg2
-import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from psycopg2.errors import UniqueViolation
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import os
-import requests
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import logging
+from scrap import scrap, verify_letterboxd_user
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
@@ -21,117 +24,232 @@ password = os.getenv("DB_PASSWORD")
 host = os.getenv("DB_HOST")
 port = os.getenv("DB_PORT")
 
-conn = psycopg2.connect(
-    dbname=dbname,
-    user=user,
-    password=password,
-    host=host,
-    port=port
-)
-cursor = conn.cursor()
+def get_db_connection():
+    return psycopg2.connect(
+        dbname=dbname,
+        user=user,
+        password=password,
+        host=host,
+        port=port
+    )
 
-def insert_user(cursor, conn, username):
+def adicionar_usuario(usuario):
+    logger.info(f"Tentando adicionar usuário {usuario} ao banco de dados")
+    
+    if not verify_letterboxd_user(usuario):
+        logger.error(f"Usuário {usuario} não existe no Letterboxd")
+        return False
+        
     try:
-        cursor.execute("INSERT INTO users (username) VALUES (%s) RETURNING id;", (username,))
-        return cursor.fetchone()[0]
-    except UniqueViolation:
-        conn.rollback()
-        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
-        return cursor.fetchone()[0]
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            scrap(cursor, conn, usuario)
+        conn.close()
+        logger.info(f"Usuário {usuario} adicionado com sucesso")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao adicionar usuário {usuario}: {str(e)}")
+        return False
 
-def insert_movie(cursor, conn, title):
+def gerar_recomendacoes(usuario_alvo):
+    logger.info(f"Iniciando geração de recomendações para usuário: {usuario_alvo}")
+    
     try:
-        cursor.execute("INSERT INTO movies (title) VALUES (%s) RETURNING id;", (title,))
-        return cursor.fetchone()[0]
-    except UniqueViolation:
-        conn.rollback()
-        cursor.execute("SELECT id FROM movies WHERE title = %s", (title,))
-        return cursor.fetchone()[0]
-
-def insert_rating(cursor, user_id, movie_id, rating):
-    try:
-        cursor.execute("INSERT INTO ratings (user_id, movie_id, rating) VALUES (%s, %s, %s);",
-                       (user_id, movie_id, rating))
-    except Exception:
-        conn.rollback()
-
-def scrap(cursor, conn, username):
-    base_url = f"https://letterboxd.com/{username}/films/by/date/page/"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    watched_movies = []
-    page = 1
-
-    while True:
-        url = f"{base_url}{page}/"
-        response = requests.get(url, headers=headers)
-
-        if response.status_code != 200:
-            break
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        movies = soup.find_all("li", class_="poster-container")
-
-        if not movies:
-            break
-
-        for movie in movies:
-            title = movie.find("img")["alt"]
-            rating_element = movie.find("span", class_="rating")
-            if rating_element:
-                rating_text = rating_element.text.strip()
-                rating = rating_text.count("★") * 1.0
-                rating += rating_text.count("½") / 2
+        conn = get_db_connection()
+        
+        query = """
+        SELECT u.username, m.title, r.rating
+        FROM ratings r
+        JOIN users u ON r.user_id = u.id
+        JOIN movies m ON r.movie_id = m.id
+        """
+        
+        logger.info("Executando query para buscar avaliações")
+        df = pd.read_sql(query, conn)
+        conn.close()
+        
+        logger.info(f"Total de registros encontrados: {len(df)}")
+        
+        if len(df) < 2:
+            logger.warning("Dados insuficientes para gerar recomendações")
+            return {
+                "error": "Não há dados suficientes para gerar recomendações",
+                "status": "insufficient_data",
+                "message": "É necessário ter pelo menos 2 usuários com avaliações para gerar recomendações",
+                "recomendacoes": [],
+                "metadata": {
+                    "total_usuarios": 0,
+                    "total_filmes": 0,
+                    "filmes_nao_vistos": 0,
+                    "total_recomendacoes": 0
+                }
+            }
+        
+        logger.info("Criando matriz de usuário-filme")
+        rating_matrix = df.pivot_table(
+            index='username',
+            columns='title',
+            values='rating'
+        ).fillna(0)
+        
+        if usuario_alvo not in rating_matrix.index:
+            logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")
+            if adicionar_usuario(usuario_alvo):
+                logger.info("Usuário adicionado com sucesso. Gerando recomendações...")
+                return gerar_recomendacoes(usuario_alvo)
             else:
-                rating = None
-            watched_movies.append((title, rating))
+                logger.warning(f"Falha ao adicionar usuário {usuario_alvo}")
+                return {
+                    "error": f"Usuário {usuario_alvo} não encontrado no banco de dados",
+                    "status": "user_not_found",
+                    "message": "O usuário não foi encontrado no banco de dados. Verifique se o nome está correto.",
+                    "recomendacoes": [],
+                    "metadata": {
+                        "total_usuarios": len(rating_matrix),
+                        "total_filmes": 0,
+                        "filmes_nao_vistos": 0,
+                        "total_recomendacoes": 0
+                    }
+                }
+        
+        filmes_usuario = df[df['username'] == usuario_alvo]['title'].unique()
+        todos_filmes = df['title'].unique()
+        filmes_nao_vistos = set(todos_filmes) - set(filmes_usuario)
+        
+        if len(rating_matrix) < 4:
+            logger.info("Usando abordagem simples para poucos usuários")
+            recomendacoes = []
+            for filme in filmes_nao_vistos:
+                if filme in rating_matrix.columns:
+                    avaliacoes = df[df['title'] == filme]['rating']
+                    media = avaliacoes.mean()
+                    num_avaliacoes = len(avaliacoes)
+                    
+                    if not np.isnan(media):
+                        score = media * (1 + 0.1 * num_avaliacoes)
+                        recomendacoes.append({
+                            'filme': filme,
+                            'score': float(score)
+                        })
+        else:
+            logger.info("Normalizando dados")
+            scaler = StandardScaler()
+            rating_matrix_scaled = scaler.fit_transform(rating_matrix)
+            
+            n_samples = len(rating_matrix)
+            n_clusters = min(4, max(2, n_samples - 1))
+            logger.info(f"Número de clusters calculado: {n_clusters}")
+            
+            logger.info("Aplicando K-means")
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+            clusters = kmeans.fit_predict(rating_matrix_scaled)
+            
+            rating_matrix['cluster'] = clusters
+            
+            cluster_usuario = rating_matrix.loc[usuario_alvo, 'cluster']
+            logger.info(f"Usuário {usuario_alvo} está no cluster {cluster_usuario}")
+            
+            usuarios_mesmo_cluster = rating_matrix[rating_matrix['cluster'] == cluster_usuario].index
+            logger.info(f"Total de usuários no mesmo cluster: {len(usuarios_mesmo_cluster)}")
+            
+            if len(usuarios_mesmo_cluster) < 2:
+                logger.info("Poucos usuários no mesmo cluster, usando todos os usuários")
+                usuarios_mesmo_cluster = rating_matrix.index
+            
+            logger.info("Calculando scores de recomendação")
+            recomendacoes = []
+            for filme in filmes_nao_vistos:
+                if filme in rating_matrix.columns:
+                    avaliacoes = df[
+                        (df['title'] == filme) & 
+                        (df['username'].isin(usuarios_mesmo_cluster))
+                    ]['rating']
+                    
+                    if len(avaliacoes) > 0:
+                        media = avaliacoes.mean()
+                        num_avaliacoes = len(avaliacoes)
+                        
+                        if not np.isnan(media):
+                            score = media * (1 + 0.1 * num_avaliacoes)
+                            recomendacoes.append({
+                                'filme': filme,
+                                'score': float(score)
+                            })
+            
+            if len(recomendacoes) < 10:
+                logger.info("Adicionando filmes populares para completar recomendações")
+                filmes_populares = []
+                for filme in filmes_nao_vistos:
+                    if filme not in [r['filme'] for r in recomendacoes]:
+                        avaliacoes = df[df['title'] == filme]['rating']
+                        media = avaliacoes.mean()
+                        num_avaliacoes = len(avaliacoes)
+                        
+                        if not np.isnan(media):
+                            score = media * (1 + 0.1 * num_avaliacoes)
+                            filmes_populares.append({
+                                'filme': filme,
+                                'score': float(score)
+                            })
+                
+                filmes_populares.sort(key=lambda x: x['score'], reverse=True)
+                recomendacoes.extend(filmes_populares[:10 - len(recomendacoes)])
+        
+        recomendacoes.sort(key=lambda x: x['score'], reverse=True)
+        
+        recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:10]}
+        
+        response = {
+            "status": "success",
+            "message": "Recomendações geradas com sucesso",
+            "recomendacoes": recomendacoes_formatadas,
+            "metadata": {
+                "total_usuarios": len(rating_matrix),
+                "total_filmes": len(todos_filmes),
+                "filmes_nao_vistos": len(filmes_nao_vistos),
+                "total_recomendacoes": len(recomendacoes)
+            }
+        }
+        
+        logger.info("Recomendações geradas com sucesso")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erro ao gerar recomendações: {str(e)}")
+        return {
+            "error": str(e),
+            "status": "error",
+            "message": "Ocorreu um erro ao gerar as recomendações",
+            "recomendacoes": {},
+            "metadata": {
+                "total_usuarios": 0,
+                "total_filmes": 0,
+                "filmes_nao_vistos": 0,
+                "total_recomendacoes": 0
+            }
+        }
 
-        page += 1
+@app.route('/api/recomendacoes/<usuario>')
+def obter_recomendacoes(usuario):
+    logger.info(f"Recebida requisição para usuário: {usuario}")
+    try:
+        recomendacoes = gerar_recomendacoes(usuario)
+        logger.info(f"Resposta gerada: {recomendacoes}")
+        return jsonify(recomendacoes)
+    except Exception as e:
+        logger.error(f"Erro na rota de recomendações: {str(e)}")
+        return jsonify({
+            "error": str(e),
+            "status": "error",
+            "message": "Ocorreu um erro ao processar a requisição",
+            "recomendacoes": {},
+            "metadata": {
+                "total_usuarios": 0,
+                "total_filmes": 0,
+                "filmes_nao_vistos": 0,
+                "total_recomendacoes": 0
+            }
+        }), 500
 
-    user_id = insert_user(cursor, conn, username)
-
-    for title, rating in watched_movies:
-        movie_id = insert_movie(cursor, conn, title)
-        if isinstance(rating, (float, int)):
-            insert_rating(cursor, user_id, movie_id, rating)
-
-    conn.commit()
-
-def carregar_dados():
-    query = """
-    SELECT u.username, m.title, r.rating
-    FROM users u
-    JOIN ratings r ON u.id = r.user_id
-    JOIN movies m ON m.id = r.movie_id
-    """
-    df = pd.read_sql(query, conn)
-    rating_matrix = df.pivot_table(index='username', columns='title', values='rating', fill_value=0)
-    return rating_matrix
-
-def gerar_recomendacoes(usuario_alvo, n_recomendacoes=12):
-    rating_matrix = carregar_dados()
-
-    kmeans = KMeans(n_clusters=4, random_state=42)
-    rating_matrix['cluster'] = kmeans.fit_predict(rating_matrix)
-
-    if usuario_alvo not in rating_matrix.index:
-        return {}
-
-    cluster_usuario = rating_matrix.loc[usuario_alvo, 'cluster']
-    usuarios_cluster = rating_matrix[rating_matrix['cluster'] == cluster_usuario]
-
-    notas_cluster = usuarios_cluster.drop(columns=['cluster'])
-    medias_por_filme = notas_cluster.mean()
-    notas_usuario = notas_cluster.loc[usuario_alvo]
-    filmes_nao_vistos = notas_usuario[notas_usuario == 0].index
-
-    recomendacoes = medias_por_filme[filmes_nao_vistos].sort_values(ascending=False)
-    return recomendacoes.head(n_recomendacoes).to_dict()
-
-@app.route('/api/recomendacoes/<usuario_alvo>', methods=['GET'])
-def obter_recomendacoes(usuario_alvo):
-    scrap(cursor, conn, usuario_alvo)
-    recomendacoes = gerar_recomendacoes(usuario_alvo)
-    return jsonify(recomendacoes)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     app.run(debug=True)

@@ -1,10 +1,25 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { Loader2, Film, Heart } from 'lucide-react';
+import { Loader2, Film, Heart, AlertCircle } from 'lucide-react';
 
 interface Recomendacao {
-  titulo: string;
-  nota_media: number;
+  filme: string;
+  score: number;
+}
+
+interface Metadata {
+  total_usuarios: number;
+  total_filmes: number;
+  filmes_nao_vistos: number;
+  total_recomendacoes: number;
+}
+
+interface ApiResponse {
+  status: 'success' | 'error' | 'insufficient_data' | 'user_not_found';
+  message: string;
+  recomendacoes: { [key: string]: number };
+  metadata: Metadata;
+  error?: string;
 }
 
 function App() {
@@ -12,26 +27,52 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [recomendacoes, setRecomendacoes] = useState<Recomendacao[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [metadata, setMetadata] = useState<Metadata | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const gerarLinkLetterboxd = (filme: string): string => {
+    const slug = filme
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .trim();
+
+    return `https://letterboxd.com/film/${slug}/`;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
+    setError(null);
+    setRecomendacoes([]);
+    setMetadata(null);
 
-    axios.get(`http://localhost:5000/api/recomendacoes/${letterboxdUsername}`)
-      .then((res) => {
-        const data = res.data;
-        const recomendacoesFormatadas = Object.keys(data).map((titulo) => ({
-          titulo,
-          nota_media: data[titulo]
+    try {
+      const response = await axios.get<ApiResponse>(`http://localhost:5000/api/recomendacoes/${letterboxdUsername}`);
+      const data = response.data;
+
+      if (data.status === 'success') {
+        const recomendacoesArray = Object.entries(data.recomendacoes).map(([filme, score]) => ({
+          filme,
+          score
         }));
-        setRecomendacoes(recomendacoesFormatadas);
-        setShowResults(true);
-      })
-      .catch((err) => {
-        console.error(err);
-        alert("Erro ao obter recomendações");
-      })
-      .finally(() => setIsLoading(false));
+
+        if (recomendacoesArray.length > 0) {
+          setRecomendacoes(recomendacoesArray);
+          setMetadata(data.metadata);
+          setShowResults(true);
+        } else {
+          setError('Nenhuma recomendação encontrada para este usuário');
+        }
+      } else {
+        setError(data.message || 'Erro ao buscar recomendações');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Erro ao conectar com o servidor');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   if (showResults) {
@@ -45,20 +86,32 @@ function App() {
 
           <section className="bg-white/10 backdrop-blur-lg rounded-xl p-6">
             <h2 className="text-xl font-semibold mb-4">Filmes recomendados para você</h2>
-            <ul className="space-y-4">
-              {recomendacoes.map((rec, idx) => (
-                <li key={idx} className="p-3 bg-white/5 rounded-lg">
-                  <span className="font-medium">{rec.titulo}</span>
-                  <span className="ml-2 text-sm text-blue-200">
-                    (Nota média: {rec.nota_media.toFixed(2)})
-                  </span>
-                </li>
-              ))}
-            </ul>
+            {recomendacoes.length > 0 ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                {recomendacoes.map((rec, idx) => (
+                  <div key={idx} className="bg-white/5 rounded-lg overflow-hidden hover:bg-white/10 transition duration-200">
+                    <div className="p-4">
+                      <a href={gerarLinkLetterboxd(rec.filme)} target="_blank" rel="noopener noreferrer">
+                        <h3 className="font-medium text-sm">{rec.filme}</h3>
+                      </a>
+                      <p className="text-xs text-blue-200">
+                        Score: {rec.score.toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-center text-blue-200">Nenhuma recomendação disponível</p>
+            )}
           </section>
 
           <button
-            onClick={() => setShowResults(false)}
+            onClick={() => {
+              setShowResults(false);
+              setRecomendacoes([]);
+              setMetadata(null);
+            }}
             className="mx-auto mt-12 flex items-center gap-2 bg-white/10 hover:bg-white/20 transition duration-200 px-6 py-3 rounded-lg"
           >
             <Heart className="w-4 h-4" />
@@ -100,6 +153,13 @@ function App() {
                 )}
               </button>
             </form>
+
+            {error && (
+              <div className="mt-4 p-4 bg-red-500/20 border border-red-500/30 rounded-lg flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 text-red-400" />
+                <p className="text-red-200">{error}</p>
+              </div>
+            )}
           </div>
         </div>
       </div>
