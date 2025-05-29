@@ -8,17 +8,14 @@ from contextlib import contextmanager
 from typing import Optional, List, Tuple
 import time
 
-# Carregar variáveis de ambiente
 load_dotenv()
 
-# Configurações do banco de dados
 dbname = os.getenv("DB_NAME")
 user = os.getenv("DB_USER")
 password = os.getenv("DB_PASSWORD")
 host = os.getenv("DB_HOST")
 port = os.getenv("DB_PORT")
 
-# Validar variáveis de ambiente
 required_env_vars = ["DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT"]
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
@@ -57,17 +54,14 @@ def check_database_state(cursor) -> dict:
     """Verifica o estado atual do banco de dados."""
     try:
         print("Verificando estado do banco de dados...")
-        # Verificar tabela users
         cursor.execute("SELECT COUNT(*) FROM users;")
         users_count = cursor.fetchone()[0]
         print(f"Total de usuários: {users_count}")
         
-        # Verificar tabela movies
         cursor.execute("SELECT COUNT(*) FROM movies;")
         movies_count = cursor.fetchone()[0]
         print(f"Total de filmes: {movies_count}")
         
-        # Verificar tabela ratings
         cursor.execute("SELECT COUNT(*) FROM ratings;")
         ratings_count = cursor.fetchone()[0]
         print(f"Total de avaliações: {ratings_count}")
@@ -84,7 +78,6 @@ def check_database_state(cursor) -> dict:
 def insert_user(cursor, conn, username: str) -> int:
     try:
         print(f"Tentando inserir usuário: {username}")
-        # Verificar se o usuário já existe
         cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
         existing_user = cursor.fetchone()
         
@@ -92,7 +85,6 @@ def insert_user(cursor, conn, username: str) -> int:
             print(f"Usuário {username} já existe com ID: {existing_user[0]}")
             return existing_user[0]
             
-        # Inserir novo usuário
         cursor.execute("INSERT INTO users (username) VALUES (%s) RETURNING id;", (username,))
         user_id = cursor.fetchone()[0]
         print(f"Usuário {username} inserido com sucesso. ID: {user_id}")
@@ -114,7 +106,6 @@ def insert_user(cursor, conn, username: str) -> int:
 def insert_movie(cursor, conn, title: str) -> int:
     try:
         print(f"Tentando inserir filme: {title}")
-        # Verificar se o filme já existe
         cursor.execute("SELECT id FROM movies WHERE title = %s", (title,))
         existing_movie = cursor.fetchone()
         
@@ -122,7 +113,6 @@ def insert_movie(cursor, conn, title: str) -> int:
             print(f"Filme {title} já existe com ID: {existing_movie[0]}")
             return existing_movie[0]
             
-        # Inserir novo filme
         cursor.execute("INSERT INTO movies (title) VALUES (%s) RETURNING id;", (title,))
         movie_id = cursor.fetchone()[0]
         print(f"Filme {title} inserido com sucesso. ID: {movie_id}")
@@ -144,7 +134,6 @@ def insert_movie(cursor, conn, title: str) -> int:
 def insert_rating(cursor, conn, user_id: int, movie_id: int, rating: float) -> None:
     try:
         print(f"Tentando inserir avaliação: usuário {user_id}, filme {movie_id}, nota {rating}")
-        # Verificar se a avaliação já existe
         cursor.execute(
             "SELECT id FROM ratings WHERE user_id = %s AND movie_id = %s",
             (user_id, movie_id)
@@ -155,7 +144,6 @@ def insert_rating(cursor, conn, user_id: int, movie_id: int, rating: float) -> N
             print(f"Avaliação já existe para usuário {user_id} e filme {movie_id}")
             return
             
-        # Inserir nova avaliação
         cursor.execute(
             "INSERT INTO ratings (user_id, movie_id, rating) VALUES (%s, %s, %s);",
             (user_id, movie_id, rating)
@@ -178,7 +166,6 @@ def verify_letterboxd_user(username: str) -> bool:
         return False
 
 def scrap(cursor, conn, username: str) -> None:
-    # Verificar se o usuário existe no Letterboxd
     if not verify_letterboxd_user(username):
         raise Exception(f"Usuário {username} não existe no Letterboxd")
 
@@ -223,18 +210,16 @@ def scrap(cursor, conn, username: str) -> None:
                     continue
 
             page += 1
-            time.sleep(1)  # Adiciona um pequeno delay para não sobrecarregar o servidor
+            time.sleep(1)
 
         if not watched_movies:
             raise Exception(f"Nenhum filme encontrado para o usuário {username}")
 
         print(f"\nTotal de filmes encontrados para {username}: {len(watched_movies)}")
 
-        # Inserir o usuário
         user_id = insert_user(cursor, conn, username)
         print(f"Usuário {username} inserido com ID {user_id}")
 
-        # Inserir os filmes e as avaliações
         movies_inserted = 0
         ratings_inserted = 0
         for title, rating in watched_movies:
@@ -248,7 +233,6 @@ def scrap(cursor, conn, username: str) -> None:
                 print(f"Erro ao processar filme {title}: {str(e)}", file=sys.stderr)
                 continue
 
-        # Commit após inserir os dados
         conn.commit()
         print(f"\nResumo para usuário {username}:")
         print(f"- Filmes inseridos: {movies_inserted}")
@@ -277,7 +261,6 @@ def main():
   "christophernolan"]
     valid_usernames = []
 
-    # Verificar quais usuários existem no Letterboxd
     print("Verificando usuários no Letterboxd...")
     for username in usernames:
         if verify_letterboxd_user(username):
@@ -292,7 +275,6 @@ def main():
 
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            # Verificar estado inicial do banco
             print("\nEstado inicial do banco de dados:")
             initial_state = check_database_state(cursor)
             print(f"Users: {initial_state['users']}")
@@ -304,7 +286,6 @@ def main():
                     print(f"\nProcessando usuário: {username}")
                     scrap(cursor, conn, username)
                     
-                    # Verificar estado após processar cada usuário
                     print(f"\nEstado do banco após processar {username}:")
                     current_state = check_database_state(cursor)
                     print(f"Users: {current_state['users']}")

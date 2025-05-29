@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 import os
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import TruncatedSVD
+from sklearn.metrics import silhouette_score
 import logging
 from scrap import scrap, verify_letterboxd_user
 
@@ -35,11 +37,9 @@ def get_db_connection():
 
 def adicionar_usuario(usuario):
     logger.info(f"Tentando adicionar usuário {usuario} ao banco de dados")
-    
     if not verify_letterboxd_user(usuario):
         logger.error(f"Usuário {usuario} não existe no Letterboxd")
         return False
-        
     try:
         conn = get_db_connection()
         with conn.cursor() as cursor:
@@ -53,23 +53,19 @@ def adicionar_usuario(usuario):
 
 def gerar_recomendacoes(usuario_alvo):
     logger.info(f"Iniciando geração de recomendações para usuário: {usuario_alvo}")
-    
     try:
         conn = get_db_connection()
-        
         query = """
         SELECT u.username, m.title, r.rating
         FROM ratings r
         JOIN users u ON r.user_id = u.id
         JOIN movies m ON r.movie_id = m.id
         """
-        
         logger.info("Executando query para buscar avaliações")
         df = pd.read_sql(query, conn)
         conn.close()
-        
         logger.info(f"Total de registros encontrados: {len(df)}")
-        
+
         if len(df) < 2:
             logger.warning("Dados insuficientes para gerar recomendações")
             return {
@@ -84,14 +80,14 @@ def gerar_recomendacoes(usuario_alvo):
                     "total_recomendacoes": 0
                 }
             }
-        
+
         logger.info("Criando matriz de usuário-filme")
         rating_matrix = df.pivot_table(
             index='username',
             columns='title',
             values='rating'
         ).fillna(0)
-        
+
         if usuario_alvo not in rating_matrix.index:
             logger.info(f"Usuário {usuario_alvo} não encontrado no banco de dados. Tentando adicionar...")
             if adicionar_usuario(usuario_alvo):
@@ -111,11 +107,11 @@ def gerar_recomendacoes(usuario_alvo):
                         "total_recomendacoes": 0
                     }
                 }
-        
+
         filmes_usuario = df[df['username'] == usuario_alvo]['title'].unique()
         todos_filmes = df['title'].unique()
         filmes_nao_vistos = set(todos_filmes) - set(filmes_usuario)
-        
+
         if len(rating_matrix) < 4:
             logger.info("Usando abordagem simples para poucos usuários")
             recomendacoes = []
@@ -124,7 +120,6 @@ def gerar_recomendacoes(usuario_alvo):
                     avaliacoes = df[df['title'] == filme]['rating']
                     media = avaliacoes.mean()
                     num_avaliacoes = len(avaliacoes)
-                    
                     if not np.isnan(media):
                         score = media * (1 + 0.1 * num_avaliacoes)
                         recomendacoes.append({
@@ -132,30 +127,43 @@ def gerar_recomendacoes(usuario_alvo):
                             'score': float(score)
                         })
         else:
-            logger.info("Normalizando dados")
+            logger.info("Normalizando e reduzindo dimensionalidade")
             scaler = StandardScaler()
             rating_matrix_scaled = scaler.fit_transform(rating_matrix)
-            
-            n_samples = len(rating_matrix)
-            n_clusters = min(4, max(2, n_samples - 1))
-            logger.info(f"Número de clusters calculado: {n_clusters}")
-            
-            logger.info("Aplicando K-means")
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-            clusters = kmeans.fit_predict(rating_matrix_scaled)
-            
+
+            # Redução de dimensionalidade para clusterização robusta
+            n_components = min(30, min(rating_matrix_scaled.shape)-1)
+            if n_components > 1:
+                svd = TruncatedSVD(n_components=n_components, random_state=42)
+                rating_matrix_reduced = svd.fit_transform(rating_matrix_scaled)
+            else:
+                rating_matrix_reduced = rating_matrix_scaled
+
+            # Escolha ótima de clusters via silhouette
+            sil_scores = []
+            possible_ks = range(2, min(11, len(rating_matrix)))
+            for k in possible_ks:
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                labels = kmeans.fit_predict(rating_matrix_reduced)
+                score = silhouette_score(rating_matrix_reduced, labels)
+                sil_scores.append(score)
+            best_k = possible_ks[np.argmax(sil_scores)]
+
+            logger.info(f"Melhor número de clusters: {best_k}")
+            kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=20)
+            clusters = kmeans.fit_predict(rating_matrix_reduced)
             rating_matrix['cluster'] = clusters
-            
+
             cluster_usuario = rating_matrix.loc[usuario_alvo, 'cluster']
             logger.info(f"Usuário {usuario_alvo} está no cluster {cluster_usuario}")
-            
+
             usuarios_mesmo_cluster = rating_matrix[rating_matrix['cluster'] == cluster_usuario].index
             logger.info(f"Total de usuários no mesmo cluster: {len(usuarios_mesmo_cluster)}")
-            
+
             if len(usuarios_mesmo_cluster) < 2:
                 logger.info("Poucos usuários no mesmo cluster, usando todos os usuários")
                 usuarios_mesmo_cluster = rating_matrix.index
-            
+
             logger.info("Calculando scores de recomendação")
             recomendacoes = []
             for filme in filmes_nao_vistos:
@@ -164,18 +172,16 @@ def gerar_recomendacoes(usuario_alvo):
                         (df['title'] == filme) & 
                         (df['username'].isin(usuarios_mesmo_cluster))
                     ]['rating']
-                    
                     if len(avaliacoes) > 0:
                         media = avaliacoes.mean()
                         num_avaliacoes = len(avaliacoes)
-                        
                         if not np.isnan(media):
                             score = media * (1 + 0.1 * num_avaliacoes)
                             recomendacoes.append({
                                 'filme': filme,
                                 'score': float(score)
                             })
-            
+
             if len(recomendacoes) < 10:
                 logger.info("Adicionando filmes populares para completar recomendações")
                 filmes_populares = []
@@ -184,21 +190,17 @@ def gerar_recomendacoes(usuario_alvo):
                         avaliacoes = df[df['title'] == filme]['rating']
                         media = avaliacoes.mean()
                         num_avaliacoes = len(avaliacoes)
-                        
                         if not np.isnan(media):
                             score = media * (1 + 0.1 * num_avaliacoes)
                             filmes_populares.append({
                                 'filme': filme,
                                 'score': float(score)
                             })
-                
                 filmes_populares.sort(key=lambda x: x['score'], reverse=True)
                 recomendacoes.extend(filmes_populares[:10 - len(recomendacoes)])
-        
+
         recomendacoes.sort(key=lambda x: x['score'], reverse=True)
-        
         recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:10]}
-        
         response = {
             "status": "success",
             "message": "Recomendações geradas com sucesso",
@@ -210,10 +212,9 @@ def gerar_recomendacoes(usuario_alvo):
                 "total_recomendacoes": len(recomendacoes)
             }
         }
-        
         logger.info("Recomendações geradas com sucesso")
         return response
-        
+
     except Exception as e:
         logger.error(f"Erro ao gerar recomendações: {str(e)}")
         return {
