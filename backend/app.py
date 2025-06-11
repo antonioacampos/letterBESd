@@ -72,7 +72,7 @@ def gerar_recomendacoes(usuario_alvo):
                 "error": "Não há dados suficientes para gerar recomendações",
                 "status": "insufficient_data",
                 "message": "É necessário ter pelo menos 2 usuários com avaliações para gerar recomendações",
-                "recomendacoes": [],
+                "recomendacoes": {},
                 "metadata": {
                     "total_usuarios": 0,
                     "total_filmes": 0,
@@ -96,12 +96,12 @@ def gerar_recomendacoes(usuario_alvo):
             else:
                 logger.warning(f"Falha ao adicionar usuário {usuario_alvo}")
                 return {
-                    "error": f"Usuário {usuario_alvo} não encontrado no banco de dados",
+                    "error": f"Usuário {usuario_alvo} não encontrado no Letterboxd ou erro ao adicionar",
                     "status": "user_not_found",
-                    "message": "O usuário não foi encontrado no banco de dados. Verifique se o nome está correto.",
-                    "recomendacoes": [],
+                    "message": "O usuário não foi encontrado no banco de dados ou não existe no Letterboxd. Verifique o nome.",
+                    "recomendacoes": {}, 
                     "metadata": {
-                        "total_usuarios": len(rating_matrix),
+                        "total_usuarios": len(rating_matrix) if not rating_matrix.empty else 0,
                         "total_filmes": 0,
                         "filmes_nao_vistos": 0,
                         "total_recomendacoes": 0
@@ -131,23 +131,28 @@ def gerar_recomendacoes(usuario_alvo):
             scaler = StandardScaler()
             rating_matrix_scaled = scaler.fit_transform(rating_matrix)
 
-            # Redução de dimensionalidade para clusterização robusta
+           
             n_components = min(30, min(rating_matrix_scaled.shape)-1)
-            if n_components > 1:
+            if n_components < 1:
+                rating_matrix_reduced = rating_matrix_scaled
+            else:
                 svd = TruncatedSVD(n_components=n_components, random_state=42)
                 rating_matrix_reduced = svd.fit_transform(rating_matrix_scaled)
-            else:
-                rating_matrix_reduced = rating_matrix_scaled
 
-            # Escolha ótima de clusters via silhouette
             sil_scores = []
-            possible_ks = range(2, min(11, len(rating_matrix)))
-            for k in possible_ks:
-                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-                labels = kmeans.fit_predict(rating_matrix_reduced)
-                score = silhouette_score(rating_matrix_reduced, labels)
-                sil_scores.append(score)
-            best_k = possible_ks[np.argmax(sil_scores)]
+            possible_ks = range(2, min(11, len(rating_matrix))) 
+            if not possible_ks:
+                 best_k = 1
+            else:
+                for k in possible_ks:
+                    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                    labels = kmeans.fit_predict(rating_matrix_reduced)
+                    if len(set(labels)) > 1:
+                        score = silhouette_score(rating_matrix_reduced, labels)
+                        sil_scores.append(score)
+                    else:
+                        sil_scores.append(-1) 
+                best_k = possible_ks[np.argmax(sil_scores)] if sil_scores and max(sil_scores) > -1 else 2
 
             logger.info(f"Melhor número de clusters: {best_k}")
             kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=20)
@@ -169,7 +174,7 @@ def gerar_recomendacoes(usuario_alvo):
             for filme in filmes_nao_vistos:
                 if filme in rating_matrix.columns:
                     avaliacoes = df[
-                        (df['title'] == filme) & 
+                        (df['title'] == filme) &
                         (df['username'].isin(usuarios_mesmo_cluster))
                     ]['rating']
                     if len(avaliacoes) > 0:
@@ -197,7 +202,9 @@ def gerar_recomendacoes(usuario_alvo):
                                 'score': float(score)
                             })
                 filmes_populares.sort(key=lambda x: x['score'], reverse=True)
-                recomendacoes.extend(filmes_populares[:10 - len(recomendacoes)])
+                novos_populares = [f for f in filmes_populares if f['filme'] not in [r['filme'] for r in recomendacoes]]
+                recomendacoes.extend(novos_populares[:10 - len(recomendacoes)])
+
 
         recomendacoes.sort(key=lambda x: x['score'], reverse=True)
         recomendacoes_formatadas = {rec['filme']: rec['score'] for rec in recomendacoes[:10]}
@@ -209,7 +216,7 @@ def gerar_recomendacoes(usuario_alvo):
                 "total_usuarios": len(rating_matrix),
                 "total_filmes": len(todos_filmes),
                 "filmes_nao_vistos": len(filmes_nao_vistos),
-                "total_recomendacoes": len(recomendacoes)
+                "total_recomendacoes": len(recomendacoes_formatadas) 
             }
         }
         logger.info("Recomendações geradas com sucesso")

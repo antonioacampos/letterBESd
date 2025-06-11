@@ -1,6 +1,6 @@
 import requests
 
-api_key = "c5c3c61117205a9006a8b282c1efcf1a"
+api_key = "b3661e4adf34873a50fd784e23823462"
 base_url = "https://api.themoviedb.org/3"
 
 def get_movies_from_tmdb(page=1):
