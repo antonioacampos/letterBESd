@@ -1,4 +1,4 @@
-# 🎬 Projeto de Recomendações de Filmes - Letterboxd
+# 🎬 Projeto de Recomendações de Filmes - LetterBESd
 
 Sistema completo de recomendação de filmes, com **backend** para processamento de dados e **frontend** para interação com o usuário.
 
